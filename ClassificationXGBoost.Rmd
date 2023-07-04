@@ -1,0 +1,321 @@
+---
+Title: "Classification ML"
+Author: "Pearly"
+Date: "`r Sys.Date()`"
+output: html_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+## Environment Set Up
+```{r}
+Sys.setenv(LANG = 'en')
+options(scipen = 9)
+setwd('C:/Users/pearly/Desktop/University Materials/02. summer semester 2023/ML')
+
+if (!require('pacman')) install.packages('pacman')
+pacman::p_load(ggplot2, reshape2,ggcorrplot,pcaPP,dplyr,vcd,corrplot,caret,car,pROC,ggpubr,recipes,xgboost,DescTools)
+
+```
+## 01. Explanatory Data
+```{r}
+df = read.csv(file="data/client_attrition_train.csv")
+str(df)
+```
+### 01.1 Handling NA Values
+```{r}
+naValues <- is.na(df)
+naCounts <- colSums(naValues)
+naCols <- names(naCounts[naCounts > 0])
+naCounts <- naCounts[naCols]
+print(data.frame(Column = naCols, NA_Count = naCounts))
+```
+
+```{r}
+# handling customer_sex : OMIT them
+df <- df[!is.na(df$customer_sex), ]
+# see the remaining NA values
+naValues <- is.na(df)
+naCounts <- colSums(naValues)
+naCols <- names(naCounts[naCounts > 0])
+naCounts <- naCounts[naCols]
+print(data.frame(Column = naCols, NA_Count = naCounts))
+```
+
+```{r}
+# handling customer_salary_range
+
+# For a categorical variable,we can use a bar plot to visualize the distribution
+barplot(table(df$customer_salary_range))
+
+# the NA will be set into the mode (below 40k)
+df$customer_salary_range <- ifelse(is.na(df$customer_salary_range), "below 40K", df$customer_salary_range)
+
+
+# see the remaining NA values
+naValues <- is.na(df)
+naCounts <- colSums(naValues)
+naCols <- names(naCounts[naCounts > 0])
+naCounts <- naCounts[naCols]
+print(data.frame(Column = naCols, NA_Count = naCounts))
+```
+
+
+```{r}
+# Handling customer_age
+barplot(table(df$customer_age))
+
+# the NA will be set into the median
+median_age <- median(df$customer_age, na.rm = TRUE)
+df$customer_age <- ifelse(is.na(df$customer_age), median_age, df$customer_age)
+
+# see the remaining NA values
+naValues <- is.na(df)
+naCounts <- colSums(naValues)
+naCols <- names(naCounts[naCounts > 0])
+naCounts <- naCounts[naCols]
+print(data.frame(Column = naCols, NA_Count = naCounts))
+```
+
+
+```{r}
+# Handling total_transaction_amount
+barplot(table(df$total_transaction_amount))
+
+# the NA will be set into the mean
+mean_transaction <- mean(df$total_transaction_amount, na.rm = TRUE)
+df$total_transaction_amount <- ifelse(is.na(df$total_transaction_amount), mean_transaction, df$total_transaction_amount)
+
+# see the remaining NA values
+naValues <- is.na(df)
+naCounts <- colSums(naValues)
+naCols <- names(naCounts[naCounts > 0])
+naCounts <- naCounts[naCols]
+print(data.frame(Column = naCols, NA_Count = naCounts))
+```
+
+### 01.2 Convert Variables
+```{r}
+# Categorical Variables - Unordered
+unordered_var <- c('customer_sex','customer_civil_status')
+df[unordered_var] <- lapply(df[unordered_var], factor, ordered = FALSE)
+# Categorical Variables - Ordered
+df$customer_education <- factor(df$customer_education, ordered = TRUE, levels = c("Unknown","Uneducated","High School","Graduate", "College","Post-Graduate","Doctorate"))
+df$customer_salary_range <- factor(df$customer_salary_range, ordered = TRUE, levels = c("Unknown","below 40K","40-60K","60-80K", "80-120K","120K and more"))
+df$credit_card_classification <- factor(df$credit_card_classification, ordered = TRUE, levels = c("Blue", "Silver", "Gold", "Platinum"))
+# targeted Variable
+df$account_status <- ifelse(df$account_status == 'closed', 1, 0)
+
+# see the summary again
+str(df)
+as.data.frame(table(df$account_status))
+```
+
+## 02. Feature Selection
+### 02.1 Numerical Variables
+```{r}
+# divide between categorical and continous variables
+cont_vars <- c('customer_age','customer_number_of_dependents','customer_relationship_length','customer_available_credit_limit','total_products',
+               'period_inactive','contacts_in_last_year','credit_card_debt_balance','remaining_credit_limit','transaction_amount_ratio',
+               'total_transaction_amount','total_transaction_count','transaction_count_ratio','average_utilization')
+# Plot the heatmap
+spearman_num <- cor(df[, cont_vars], method = "spearman")
+
+# Plot the correlation matrix using ggcorrplot
+ggcorrplot(spearman_num, type = "upper", colors = c("#6D9EC1", "white", "#E28C18"),
+           lab = TRUE, ggtheme = ggplot2::theme_light, tl.cex=8, tl.srt = 45, lab_size = 2)
+```
+
+```{r}
+# omiting high correlated variables:
+omit_num_vars <- c('remaining_credit_limit','customer_available_credit_limit')
+df <- df[-which(names(df) %in% omit_num_vars)]
+```
+
+### 02.2 Categorical Variables
+```{r}
+cat_vars <- c('customer_sex','customer_education','customer_civil_status','customer_salary_range','credit_card_classification')
+df_cat <- as.data.frame(lapply(df[, cat_vars], as.numeric))
+
+# Compute the correlation matrix
+spearman_var <- cor(df_cat, method = "spearman")
+ggcorrplot(spearman_var, type = "upper", colors = c("#6D9EC1", "white", "#E28C18"),
+           lab = TRUE, ggtheme = ggplot2::theme_light, tl.cex=8, tl.srt = 45, lab_size = 2)
+```
+
+
+```{r}
+# omit the categorical var which is highly correlated
+df <- df[, !(names(df) %in% "customer_sex")]
+```
+
+```{r}
+str(df)
+```
+
+## 03 downsampling
+```{r}
+table(df$account_status)
+
+majority_indices <- which(df$account_status == 0)
+downsampled_indices <- sample(majority_indices, size = length(which(df$account_status == 1)))
+downsampled_indices <- c(downsampled_indices, which(df$account_status == 1))
+downsampled_df <- df[downsampled_indices, ]
+table(downsampled_df$account_status)
+```
+
+## 04. Train Test Split
+```{r}
+# Set the seed for reproducibility
+set.seed(123)
+
+# Create stratified train-test split with balanced classes
+split <- createDataPartition(downsampled_df$account_status, p = 0.8, list = FALSE)
+
+# Split the data
+dftrain <- downsampled_df[split, ]
+dftest <- downsampled_df[-split, ]
+table(dftrain$account_status)
+table(dftest$account_status)
+```
+## 05. Modelling
+
+### 05.1 XGBoost Model
+```{r}
+train.x <- model.matrix(account_status~.-customer_id ,data = dftrain)
+test.x <- model.matrix(account_status~.-customer_id ,data = dftest)
+
+model.xgb <- xgboost(data = data.matrix(train.x[,-1]),
+                     label = as.numeric(as.character(dftrain$account_status)),
+                     eta = 0.1, # learning rate
+                     max_depth = 20, # controls the depth of the trees
+                     nround = 50, # maximum controls of iterations
+                     objective = "binary:logistic") 
+```
+
+### 05.2 Prediction
+```{r}
+predictions <- predict(model.xgb, newdata = data.matrix(test.x[,-1]))
+predicted_classes <- ifelse(predictions > 0.5,1,0)
+dftest$labels <- predicted_classes
+```
+```{r}
+cm<-confusionMatrix(data = as.factor(dftest$labels) , reference = as.factor(dftest$account_status))
+cm
+```
+
+
+### 05.3 Confusion Matrix
+```{r}
+actual_classes <- dftest$account_status
+confusion_matrix <- as.data.frame(table(predicted_classes, actual_classes))
+p <- ggplot(data = confusion_matrix, mapping = aes(x = predicted_classes,y = actual_classes)) +
+  geom_tile(aes(fill = Freq)) +
+  geom_text(aes(label = sprintf("%1.0f", Freq)), vjust = 1) +
+  scale_fill_gradient(low = "#655DBB",high = "#ECF2FF") +
+  theme_bw() + theme(panel.border = element_blank(),panel.grid.major = element_blank(),
+                     plot.title = element_text(hjust=0.5)) + labs(title = "Confusion Matrix",
+                                                                  x = "Predicted class",
+                                                                  y = "True class")
+p
+```
+```{r}
+# Calculate the confusion matrix
+# Calculate class accuracies
+class_accuracies <- cm$byClass["Balanced Accuracy"]
+
+# Calculate balanced accuracy
+balanced_accuracy <- mean(class_accuracies)
+
+# Plot the balanced accuracy
+barplot(class_accuracies,
+        names.arg = names(class_accuracies),
+        xlab = "Class",
+        ylab = "Accuracy",
+        main = "Balanced Accuracy by Class",
+        ylim = c(0, 1))
+
+# Add a line for the overall balanced accuracy
+abline(h = balanced_accuracy, col = "red", lwd = 2)
+```
+
+## 06. Predict Test Set Data
+```{r}
+df_test_csv = read.csv(file="data/client_attrition_test.csv")
+str(df_test_csv)
+```
+### 06.1 Handling NA
+```{r}
+naValues <- is.na(df_test_csv)
+naCounts <- colSums(naValues)
+naCols <- names(naCounts[naCounts > 0])
+naCounts <- naCounts[naCols]
+NAtable <- data.frame(Column = naCols, NA_Count = naCounts)
+NAtable
+```
+
+
+```{r}
+# assign the customer_sex randomly F and M
+df_test_csv <- df_test_csv %>%
+  mutate(customer_sex = ifelse(is.na(customer_sex), sample(c("M", "F"), size = sum(is.na(customer_sex)), replace = TRUE), customer_sex))
+
+median_tta <- median(df_test_csv$total_transaction_amount, na.rm = TRUE)
+median_age <- median(df_test_csv$customer_age, na.rm = TRUE)
+
+mode_csr <- names(table(df_test_csv$customer_salary_range))[which.max(table(df_test_csv$customer_salary_range))]
+df_test_csv$total_transaction_amount[is.na(df_test_csv$total_transaction_amount)] <- median_tta
+
+df_test_csv$customer_age[is.na(df_test_csv$customer_age)] <- median_age
+df_test_csv$customer_salary_range[is.na(df_test_csv$customer_salary_range)] <- mode_csr
+
+naValues <- is.na(df_test_csv)
+naCounts <- colSums(naValues)
+naCols <- names(naCounts[naCounts > 0])
+naCounts <- naCounts[naCols]
+NAtable <- data.frame(Column = naCols, NA_Count = naCounts)
+NAtable
+
+```
+### 06.2 Data Preprocessing
+```{r}
+
+# ----- convert Vals -----
+df_to_predict <- df_test_csv
+# Categorical Variables - Unordered
+unordered_var <- c('customer_sex','customer_civil_status')
+df_to_predict[unordered_var] <- lapply(df_to_predict[unordered_var], factor, ordered = FALSE)
+# Categorical Variables - Ordered
+df_to_predict$customer_education <- factor(df_to_predict$customer_education, ordered = TRUE, levels = c("Unknown","Uneducated","High School","Graduate", "College","Post-Graduate","Doctorate"))
+df_to_predict$customer_salary_range <- factor(df_to_predict$customer_salary_range, ordered = TRUE, levels = c("Unknown","below 40K","40-60K","60-80K", "80-120K","120K and more"))
+df_to_predict$credit_card_classification <- factor(df_to_predict$credit_card_classification, ordered = TRUE, levels = c("Blue", "Silver", "Gold", "Platinum"))
+
+```
+```{r}
+# ----- dropping Vars -----
+
+omit_num_vars <- c('remaining_credit_limit','customer_available_credit_limit')
+df_to_predict <- df_to_predict[-which(names(df_to_predict) %in% omit_num_vars)]
+df_to_predict <- df_to_predict[, !(names(df_to_predict) %in% "customer_sex")]
+df_to_predict$account_status <- 0
+dim(df_to_predict)
+
+any(is.na(df_to_predict))
+```
+### 06.3 Predictions
+```{r}
+# ---- MATRIX ----
+testing.x <- model.matrix(account_status~.-customer_id ,data = df_to_predict)
+dim(testing.x)
+```
+
+```{r}
+predictions_test <- predict(model.xgb, newdata = data.matrix(testing.x[,-1]))
+predicted_classes_test <- ifelse(predictions_test > 0.5,1,0)
+df_test_csv$labels <- predicted_classes_test
+```
+
+```{r}
+write.csv(df_test_csv, 'classification_df_xgb.csv')
+# 'closed' ==  1, 'open' == 0
+```

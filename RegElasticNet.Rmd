@@ -1,0 +1,282 @@
+---
+title: "Regression ML"
+author: "Pearly"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+## Environment Set Up
+```{r}
+Sys.setenv(LANG = 'en')
+options(scipen = 9)
+setwd('C:/Users/pearly/Desktop/University Materials/02. summer semester 2023/ML')
+source('F_regression_metrics.R')
+if (!require('pacman')) install.packages('pacman')
+pacman::p_load(DescTools,ggplot2,ggcorrplot,dplyr,corrplot,tidyr,caret,MLmetrics,glmnet,e1071)
+
+```
+## 01. Explanatory Data
+```{r}
+df = read.csv(file="data/newborn_train.csv")
+str(df)
+```
+### 01.1 Handling NA Values
+```{r}
+createNAtable <- function(df) {
+  naValues <- is.na(df)
+  naCounts <- colSums(naValues)
+  naCols <- names(naCounts[naCounts > 0])
+  naCounts <- naCounts[naCols]
+  NAtable <- data.frame(Column = naCols, NA_Count = naCounts)
+  NAtable$NA_Percentage <- (NAtable$NA_Count / nrow(df)) * 100
+  NAtable$mean <- sapply(df[, naCols], mean, na.rm = TRUE)
+  NAtable$median <- sapply(df[, naCols], median, na.rm = TRUE)
+  return(list(NAtable = NAtable, naCols = naCols))
+}
+NAdf <- createNAtable(df)
+NAdf$NAtable
+NAdf$naCols
+```
+
+```{r}
+# plot some distributions for variables which have NA values
+for (col in NAdf$naCols){
+  barplot(table(df[[col]]), xlab = col)
+}
+```
+
+```{r}
+# -------------------------------------------------------------------------
+# mother_marital_status -> would be omitted because it's a binary variable
+df <- df[!is.na(df$mother_marital_status), ]
+
+# -------------------------------------------------------------------------
+# the other numerical values would be replaced either by mean or median
+# mother_body_mass_index
+med_mother_body_mass_index <- median(df$mother_body_mass_index, na.rm = TRUE)
+df$mother_body_mass_index <- ifelse(is.na(df$mother_body_mass_index), med_mother_body_mass_index, df$mother_body_mass_index)
+# mother_delivery_weight
+med_mother_delivery_weight <- median(df$mother_delivery_weight, na.rm = TRUE)
+df$mother_delivery_weight <- ifelse(is.na(df$mother_delivery_weight), med_mother_delivery_weight, df$mother_delivery_weight)
+# mother_height
+med_mother_height <- median(df$mother_height, na.rm = TRUE)
+df$mother_height <- ifelse(is.na(df$mother_height), med_mother_height, df$mother_height)
+# mother_weight_gain
+med_mother_weight_gain <- median(df$mother_weight_gain, na.rm = TRUE)
+df$mother_weight_gain <- ifelse(is.na(df$mother_weight_gain), med_mother_weight_gain, df$mother_weight_gain)
+# father_age
+med_father_age <- median(df$father_age, na.rm = TRUE)
+df$father_age <- ifelse(is.na(df$father_age), med_father_age, df$father_age)
+
+# cigarettes_before_pregnancy -> assign NA to 0
+df$cigarettes_before_pregnancy <- ifelse(is.na(df$cigarettes_before_pregnancy), 0, df$cigarettes_before_pregnancy)
+
+# number_prenatal_visits
+mean_number_prenatal_visits <- round(mean(df$number_prenatal_visits, na.rm = TRUE))
+df$number_prenatal_visits <- ifelse(is.na(df$number_prenatal_visits), mean_number_prenatal_visits,
+                                         df$number_prenatal_visits)
+```
+
+```{r}
+NAdf <- createNAtable(df)
+NAdf$NAtable
+str(df)
+```
+### 01.2 Convert Values
+```{r}
+# ---------------- Categorical Variables - Unordered ----------------
+unordered_var <- c('previous_cesarean','newborn_gender')
+df[unordered_var] <- lapply(df[unordered_var], factor, ordered = FALSE)
+
+# Convert 'mother_marital_status' column to factor with labels
+df$mother_marital_status <- factor(df$mother_marital_status, levels = c(1, 2), labels = c("Yes", "No"))
+# Convert 'mother_race' column to factor with labels
+df$mother_race <- factor(df$mother_race, levels = 1:6, labels = c("White", "Black", "AIAN", "Asian", "NHOPI", "More than one race"))
+
+# ---------------- Categorical Variables - Ordered ----------------
+# Convert 'father_education' column to ordered factor with labels
+education_levels <- c("8th grade or less", "9-12th grade, no diploma", "High school graduate or GED completed",
+                      "Some college credit but no degree", "Associate degree", "Bachelor’s degree",
+                      "Master’s degree", "Doctorate or Professional degree", "Unknown")
+df$father_education <- factor(df$father_education, levels = 1:9, labels = education_levels, ordered = TRUE)
+
+# ---------------- see data structure again ----------------
+str(df)
+
+```
+
+### 01.3 Removing Outliers
+```{r}
+# create a function to remove outliers
+remove_outliers <- function(data, variable_name, z_score_threshold = 3) {
+  variable <- data[[variable_name]]
+  z_scores <- (variable - mean(variable)) / sd(variable)
+  outlier_indices <- which(abs(z_scores) > z_score_threshold)
+  data_no_outliers <- data[-outlier_indices, ]
+  return(data_no_outliers)
+}
+# iterate to remove outliers
+num_vars <- c('mother_body_mass_index', 'mother_delivery_weight', 'mother_height', 'mother_weight_gain',
+              'father_age', 'prenatal_care_month', 'number_prenatal_visits', 'newborn_weight')
+for (col in num_vars){
+  df <- remove_outliers(df,col)
+}
+```
+
+```{r}
+# see overall distributions 
+Desc(df)
+```
+
+## 02. Feature Selection
+```{r}
+num_vars_cor<-c('mother_body_mass_index','mother_delivery_weight','mother_height','mother_weight_gain',
+                'father_age','cigarettes_before_pregnancy','prenatal_care_month','number_prenatal_visits')
+
+spearman_num <- cor(df[, num_vars_cor], method = "spearman")
+ggcorrplot(spearman_num, type = "upper", colors = c("#6D9EC1", "white", "#E28C18"),
+           lab = TRUE, ggtheme = ggplot2::theme_light, tl.cex=8, tl.srt = 45, lab_size = 2)
+```
+
+
+```{r}
+# omitting high correlated variable : mother_delivery_weight
+df <- subset(df, select = -mother_delivery_weight)
+```
+
+
+## 03. Train-Test Split
+```{r}
+# Set the seed for reproducibility
+set.seed(123)
+
+# Create stratified train-test split with balanced classes
+split <- createDataPartition(df$newborn_weight, p = 0.9, list = FALSE)
+
+# Split the data
+dftrain <- df[split, ]
+dftest <- df[-split, ]
+dim(dftrain)
+dim(dftest)
+```
+## 04. Features Scalling
+```{r}
+num_vars_cor<-c('mother_body_mass_index','mother_height','mother_weight_gain',
+                'father_age','cigarettes_before_pregnancy','prenatal_care_month','number_prenatal_visits')
+dftrain <- dftrain %>% mutate_at(vars(num_vars_cor), scale)
+dftest <- dftest %>% mutate_at(vars(num_vars_cor), scale)
+```
+## 05. Modelling
+
+### 05.1 Training Control Elastic Net
+```{r}
+#cols_reg<-c('mother_body_mass_index','mother_height','mother_weight_gain',
+#                'father_age','cigarettes_before_pregnancy','prenatal_care_month',
+#                'number_prenatal_visits','newborn_weight')
+train_cont <- trainControl(method = "cv",
+                              number = 5)
+
+elastic_reg <- train(newborn_weight ~ .,
+                           data = dftrain,
+                           method = "glmnet",
+                           trControl = train_cont)
+
+summary(elastic_reg)
+print(elastic_reg$bestTune)
+```
+
+### 05.2 Metrics
+```{r}
+predictions_test <- predict(elastic_reg, dftest)
+dftest$y_pred <- predictions_test
+regressionMetrics(dftest$newborn_weight,dftest$y_pred)
+```
+
+### 05.4 Plot Actual Vs Predicted
+```{r}
+ggplot(dftest[1:700,], aes(x=y_pred, y= newborn_weight)) +
+  geom_point() +
+  geom_abline(intercept=0, slope=1) +
+  labs(x='Predicted Values', y='Actual Values', title='Predicted vs. Actual Values')
+```
+
+## 06. Predicting Test CSV
+```{r}
+df_test_csv = read.csv(file="data/newborn_test.csv")
+NAdf_test <- createNAtable(df_test_csv)
+NAdf_test$NAtable
+str(df_test_csv)
+```
+
+### 06.1 handling na
+```{r}
+
+df_test_csv <- df_test_csv %>%
+  mutate(mother_marital_status = ifelse(is.na(mother_marital_status), sample(c(1, 2), size = sum(is.na(mother_marital_status)), replace = TRUE), mother_marital_status))
+
+# the other numerical values would be replaced either by mean or median
+# mother_body_mass_index
+med_mother_body_mass_index <- median(df_test_csv$mother_body_mass_index, na.rm = TRUE)
+df_test_csv$mother_body_mass_index <- ifelse(is.na(df_test_csv$mother_body_mass_index), med_mother_body_mass_index, df_test_csv$mother_body_mass_index)
+# mother_delivery_weight
+med_mother_delivery_weight <- median(df_test_csv$mother_delivery_weight, na.rm = TRUE)
+df_test_csv$mother_delivery_weight <- ifelse(is.na(df_test_csv$mother_delivery_weight), med_mother_delivery_weight, df_test_csv$mother_delivery_weight)
+# mother_height
+med_mother_height <- median(df_test_csv$mother_height, na.rm = TRUE)
+df_test_csv$mother_height <- ifelse(is.na(df_test_csv$mother_height), med_mother_height, df_test_csv$mother_height)
+# mother_weight_gain
+med_mother_weight_gain <- median(df_test_csv$mother_weight_gain, na.rm = TRUE)
+df_test_csv$mother_weight_gain <- ifelse(is.na(df_test_csv$mother_weight_gain), med_mother_weight_gain, df_test_csv$mother_weight_gain)
+# father_age
+med_father_age <- median(df_test_csv$father_age, na.rm = TRUE)
+df_test_csv$father_age <- ifelse(is.na(df_test_csv$father_age), med_father_age, df_test_csv$father_age)
+
+# cigarettes_before_pregnancy -> assign NA to 0
+df_test_csv$cigarettes_before_pregnancy <- ifelse(is.na(df_test_csv$cigarettes_before_pregnancy), 0, df_test_csv$cigarettes_before_pregnancy)
+
+# number_prenatal_visits
+mean_number_prenatal_visits <- round(mean(df_test_csv$number_prenatal_visits, na.rm = TRUE))
+df_test_csv$number_prenatal_visits <- ifelse(is.na(df_test_csv$number_prenatal_visits), mean_number_prenatal_visits,
+                                         df_test_csv$number_prenatal_visits)
+
+```
+### 06.2 Converting Variables
+```{r}
+# ---------------- Categorical Variables - Unordered ----------------
+unordered_var <- c('previous_cesarean','newborn_gender')
+df_test_csv[unordered_var] <- lapply(df_test_csv[unordered_var], factor, ordered = FALSE)
+
+# Convert 'mother_marital_status' column to factor with labels
+df_test_csv$mother_marital_status <- factor(df_test_csv$mother_marital_status, levels = c(1, 2), labels = c("Yes", "No"))
+# Convert 'mother_race' column to factor with labels
+df_test_csv$mother_race <- factor(df_test_csv$mother_race, levels = 1:6, labels = c("White", "Black", "AIAN", "Asian", "NHOPI", "More than one race"))
+
+# ---------------- Categorical Variables - Ordered ----------------
+# Convert 'father_education' column to ordered factor with labels
+education_levels <- c("8th grade or less", "9-12th grade, no diploma", "High school graduate or GED completed",
+                      "Some college credit but no degree", "Associate degree", "Bachelor’s degree",
+                      "Master’s degree", "Doctorate or Professional degree", "Unknown")
+df_test_csv$father_education <- factor(df_test_csv$father_education, levels = 1:9, labels = education_levels, ordered = TRUE)
+
+
+```
+
+### 06.3 Predictions
+```{r}
+df_test_csv_1 <- df_test_csv
+df_test_csv_1 <- subset(df_test_csv_1, select = -mother_delivery_weight)
+num_vars_cor<-c('mother_body_mass_index','mother_height','mother_weight_gain',
+                'father_age','cigarettes_before_pregnancy','prenatal_care_month','number_prenatal_visits')
+df_test_csv_1 <- df_test_csv_1 %>% mutate_at(vars(num_vars_cor), scale)
+
+
+predictions_test_csv <- predict(elastic_reg, df_test_csv_1)
+df_test_csv$y_pred <- predictions_test_csv
+```
+
+```{r}
+write.csv(df_test_csv, 'regression_df_ElNet.csv')
+```
